@@ -5,7 +5,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"sort"
 	"strings"
 
 	"github.com/jmoiron/sqlx"
@@ -109,20 +108,102 @@ func (r *OrderRepository) GetShippingOrders(ctx context.Context) ([]model.Order,
 	return orders, err
 }
 
-// 注文履歴一覧を取得
+// 注文履歴一覧を取得 (DB側でソート、フィルタ、Offset/Limitを実行)
 func (r *OrderRepository) ListOrders(ctx context.Context, userID int, req model.ListRequest) ([]model.Order, int, error) {
+
+	// --- 1. ソート順の決定 ---
+	// SQLインジェクション防止のため、ソート可能な列をホワイトリストで管理
+	sortFieldMap := map[string]string{
+		"order_id":       "o.order_id",
+		"product_name":   "p.name",
+		"created_at":     "o.created_at",
+		"shipped_status": "o.shipped_status",
+		"arrived_at":     "o.arrived_at",
+	}
+
+	sortColumn, ok := sortFieldMap[req.SortField]
+	if !ok {
+		sortColumn = "o.order_id" // デフォルトのソート列
+	}
+
+	sortOrder := "ASC"
+	if strings.ToUpper(req.SortOrder) == "DESC" {
+		sortOrder = "DESC"
+	}
+
+	if req.PageSize < 0 {
+		// PageSizeが0以下の場合、デフォルト値を設定（例: 20件）
+		// これにより LIMIT 0 を防ぐ
+		req.PageSize = 20
+	}
+	if req.Offset < 0 {
+		req.Offset = 0 // 負のオフセットは0にする
+	}
+	// --- 2. フィルタリング条件の構築 (総件数クエリとメインクエリで共用) ---
+	whereClauses := []string{"o.user_id = ?"}
+	// メインクエリ用の引数リスト
+	args := []interface{}{userID}
+	// COUNTクエリ用の引数リスト (LIMIT/OFFSETを含まないため別管理)
+	countArgs := []interface{}{userID}
+
+	if req.Search != "" {
+		var searchPattern string
+		if req.Type == "prefix" {
+			searchPattern = req.Search + "%"
+		} else {
+			// デフォルトは "contains"
+			searchPattern = "%" + req.Search + "%"
+		}
+		whereClauses = append(whereClauses, "p.name LIKE ?")
+		args = append(args, searchPattern)
+		countArgs = append(countArgs, searchPattern)
+	}
+
+	whereQuery := strings.Join(whereClauses, " AND ")
+
+	// --- 3. 総件数(total)の取得クエリ (フィルタ条件を適用) ---
+	countQuery := `
+		SELECT COUNT(*)
+		FROM orders o
+		JOIN products p ON o.product_id = p.product_id
+		WHERE ` + whereQuery
+
+	var total int
+	countQueryRebound := r.db.Rebind(countQuery)
+	// COUNTクエリには countArgs を使用
+	if err := r.db.GetContext(ctx, &total, countQueryRebound, countArgs...); err != nil {
+		return nil, 0, fmt.Errorf("failed to count orders: %w", err)
+	}
+
+	// --- 4. メインクエリの構築 (ORDER BY, LIMIT, OFFSET) ---
+
+	var orderByClause string
+	if sortColumn == "o.order_id" {
+		orderByClause = fmt.Sprintf("ORDER BY %s %s", sortColumn, sortOrder)
+	} else {
+		orderByClause = fmt.Sprintf("ORDER BY %s %s, o.order_id ASC", sortColumn, sortOrder)
+	}
+
 	query := `
-        SELECT 
-            o.order_id, 
-            o.product_id, 
-            o.shipped_status, 
-            o.created_at, 
-            o.arrived_at,
-            p.name AS product_name
-        FROM orders o
-        JOIN products p ON o.product_id = p.product_id
-        WHERE o.user_id = ?
-    `
+		SELECT 
+			o.order_id, 
+			o.product_id, 
+			o.shipped_status, 
+			o.created_at, 
+			o.arrived_at,
+			p.name AS product_name
+		FROM orders o
+		JOIN products p ON o.product_id = p.product_id
+		WHERE ` + whereQuery + `
+		` + orderByClause + `
+		LIMIT ? OFFSET ?`
+
+	// メインクエリ用の引数にLIMITとOFFSETを追加
+	args = append(args, req.PageSize, req.Offset)
+
+	// --- 5. クエリ実行とマッピング ---
+	// ( ... これ以降のロジックは変更なし )
+	// --- 5. クエリ実行とマッピング ---
 	type orderRow struct {
 		OrderID       int          `db:"order_id"`
 		ProductID     int          `db:"product_id"`
@@ -131,105 +212,28 @@ func (r *OrderRepository) ListOrders(ctx context.Context, userID int, req model.
 		ArrivedAt     sql.NullTime `db:"arrived_at"`
 		ProductName   string       `db:"product_name"`
 	}
+
 	var ordersRaw []orderRow
-	if err := r.db.SelectContext(ctx, &ordersRaw, query, userID); err != nil {
-		return nil, 0, err
+	queryRebound := r.db.Rebind(query)
+	// メインクエリには args を使用
+	if err := r.db.SelectContext(ctx, &ordersRaw, queryRebound, args...); err != nil {
+		return nil, 0, fmt.Errorf("failed to list orders: %w", err)
 	}
 
-	var orders []model.Order
+	// --- 6. 結果のマッピング ---
+	// メモリ上でのフィルタリングやソート、スライス操作はすべて不要
+	orders := make([]model.Order, 0, len(ordersRaw))
 	for _, o := range ordersRaw {
-		if req.Search != "" {
-			if req.Type == "prefix" {
-				if !strings.HasPrefix(o.ProductName, req.Search) {
-					continue
-				}
-			} else {
-				if !strings.Contains(o.ProductName, req.Search) {
-					continue
-				}
-			}
-		}
 		orders = append(orders, model.Order{
 			OrderID:       int64(o.OrderID),
 			ProductID:     o.ProductID,
 			ProductName:   o.ProductName,
 			ShippedStatus: o.ShippedStatus,
-			CreatedAt:     o.CreatedAt.Time,
+			CreatedAt:     o.CreatedAt.Time, // NullTimeからTimeへ
 			ArrivedAt:     o.ArrivedAt,
 		})
 	}
 
-	switch req.SortField {
-	case "product_name":
-		if strings.ToUpper(req.SortOrder) == "DESC" {
-			sort.SliceStable(orders, func(i, j int) bool {
-				return orders[i].ProductName > orders[j].ProductName
-			})
-		} else {
-			sort.SliceStable(orders, func(i, j int) bool {
-				return orders[i].ProductName < orders[j].ProductName
-			})
-		}
-	case "created_at":
-		if strings.ToUpper(req.SortOrder) == "DESC" {
-			sort.SliceStable(orders, func(i, j int) bool {
-				return orders[i].CreatedAt.After(orders[j].CreatedAt)
-			})
-		} else {
-			sort.SliceStable(orders, func(i, j int) bool {
-				return orders[i].CreatedAt.Before(orders[j].CreatedAt)
-			})
-		}
-	case "shipped_status":
-		if strings.ToUpper(req.SortOrder) == "DESC" {
-			sort.SliceStable(orders, func(i, j int) bool {
-				return orders[i].ShippedStatus > orders[j].ShippedStatus
-			})
-		} else {
-			sort.SliceStable(orders, func(i, j int) bool {
-				return orders[i].ShippedStatus < orders[j].ShippedStatus
-			})
-		}
-	case "arrived_at":
-		if strings.ToUpper(req.SortOrder) == "DESC" {
-			sort.SliceStable(orders, func(i, j int) bool {
-				if orders[i].ArrivedAt.Valid && orders[j].ArrivedAt.Valid {
-					return orders[i].ArrivedAt.Time.After(orders[j].ArrivedAt.Time)
-				}
-				return orders[i].ArrivedAt.Valid
-			})
-		} else {
-			sort.SliceStable(orders, func(i, j int) bool {
-				if orders[i].ArrivedAt.Valid && orders[j].ArrivedAt.Valid {
-					return orders[i].ArrivedAt.Time.Before(orders[j].ArrivedAt.Time)
-				}
-				return orders[j].ArrivedAt.Valid
-			})
-		}
-	case "order_id":
-		fallthrough
-	default:
-		if strings.ToUpper(req.SortOrder) == "DESC" {
-			sort.SliceStable(orders, func(i, j int) bool {
-				return orders[i].OrderID > orders[j].OrderID
-			})
-		} else {
-			sort.SliceStable(orders, func(i, j int) bool {
-				return orders[i].OrderID < orders[j].OrderID
-			})
-		}
-	}
-
-	total := len(orders)
-	start := req.Offset
-	end := req.Offset + req.PageSize
-	if start > total {
-		start = total
-	}
-	if end > total {
-		end = total
-	}
-	pagedOrders := orders[start:end]
-
-	return pagedOrders, total, nil
+	// DBから取得した件数(pagedOrders)と、フィルタ条件に合う総件数(total)を返す
+	return orders, total, nil
 }
