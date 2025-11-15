@@ -6,6 +6,8 @@ import (
 	"backend/internal/middleware"
 	"backend/internal/repository"
 	"backend/internal/service"
+	"context"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -13,19 +15,37 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/jmoiron/sqlx"
 	"github.com/riandyrn/otelchi"
+
+	"github.com/go-redis/redis/v8"
 )
 
 type Server struct {
 	Router *chi.Mux
 }
 
-func NewServer() (*Server, *sqlx.DB, error) {
+func NewServer() (*Server, *sqlx.DB, *redis.Client, error) {
+	ctx := context.Background()
+
+	// 1. Redis接続の初期化と正常性チェック
+	rdbClient := redis.NewClient(&redis.Options{
+		Addr:     "redis:6379", // docker-compose.ymlで定義したサービス名
+		Password: "",           // パスワードがない場合
+		DB:       0,            // 使用するデータベース番号
+	})
+
+	// Pingによる正常性チェック
+	if _, err := rdbClient.Ping(ctx).Result(); err != nil {
+		rdbClient.Close() // 接続失敗時はクローズ
+		return nil, nil, nil, fmt.Errorf("failed to connect to Redis: %w", err)
+	}
+	log.Println("Successfully connected to Redis.")
+
 	dbConn, err := db.InitDBConnection()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
-	store := repository.NewStore(dbConn)
+	store := repository.NewStore(dbConn, rdbClient)
 
 	authService := service.NewAuthService(store)
 	orderService := service.NewOrderService(store)
@@ -66,7 +86,7 @@ func NewServer() (*Server, *sqlx.DB, error) {
 
 	s.setupRoutes(authHandler, productHandler, orderHandler, robotHandler, userAuthMW, robotAuthMW)
 
-	return s, dbConn, nil
+	return s, dbConn, rdbClient, nil
 }
 
 func (s *Server) setupRoutes(

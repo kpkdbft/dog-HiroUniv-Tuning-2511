@@ -15,7 +15,7 @@ func main() {
 		defer func() { _ = shutdown(context.Background()) }()
 	}
 
-	srv, dbConn, err := server.NewServer()
+	srv, dbConn, rdbClient, err := server.NewServer()
 	if err != nil {
 		log.Fatalf("Failed to initialize server: %v", err)
 	}
@@ -23,5 +23,8 @@ func main() {
 		defer dbConn.Close()
 	}
 
+	if rdbClient != nil {
+		defer rdbClient.Close()
+	}
 	srv.Run()
 }
