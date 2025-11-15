@@ -58,7 +58,7 @@ func (s *RobotService) UpdateOrderStatus(ctx context.Context, orderID int64, new
 }
 
 // selectOrdersForDelivery は動的計画法を使用してナップサック問題を解きます
-// 計算量: O(n * capacity) - 以前のO(2^n)から大幅に高速化
+// 📌 高速化: 空間計算量をO(capacity)に最適化し、copy()オーバーヘッドを排除
 func selectOrdersForDelivery(ctx context.Context, orders []model.Order, robotID string, robotCapacity int) (model.DeliveryPlan, error) {
 	n := len(orders)
 	if n == 0 {
@@ -73,12 +73,10 @@ func selectOrdersForDelivery(ctx context.Context, orders []model.Order, robotID 
 	// コンテキストキャンセレーションチェック用
 	checkEvery := 1000
 
-	// dp[i][w] = i番目までの注文で、重量w以下での最大価値
-	// 空間最適化のため、2つの行だけを保持
-	dp := make([][]int, 2)
-	dp[0] = make([]int, robotCapacity+1)
-	dp[1] = make([]int, robotCapacity+1)
-	
+	// 📌 修正点 1: DPテーブルを1次元配列に変更
+	// dp[w] = 現在の注文まで見た時、重量w以下での最大価値
+	dp := make([]int, robotCapacity+1)
+
 	// 復元用: choice[i][w] = i番目の注文まで見た時、重量wでi番目の注文を選んだかどうか
 	choice := make([][]bool, n)
 	for i := range choice {
@@ -86,8 +84,6 @@ func selectOrdersForDelivery(ctx context.Context, orders []model.Order, robotID 
 	}
 
 	// 動的計画法のメインループ
-	prev := 0
-	curr := 1
 	for i := 0; i < n; i++ {
 		// 定期的にコンテキストキャンセレーションをチェック
 		if i > 0 && i%checkEvery == 0 {
@@ -102,27 +98,26 @@ func selectOrdersForDelivery(ctx context.Context, orders []model.Order, robotID 
 		weight := order.Weight
 		value := order.Value
 
-		// 前の状態をコピー
-		copy(dp[curr], dp[prev])
+		// 📌 修正点 3: copy(dp[curr], dp[prev]) を削除
 
-		// 逆順にループすることで、同じ注文を2回選ばないようにする
+		// 📌 修正点 4: ループを逆順（w := robotCapacity から）に変更
+		// これにより、1次元配列でも各注文が1回しか使われないことが保証される
 		for w := robotCapacity; w >= weight; w-- {
 			// 現在の注文を含めた場合の価値
-			newValue := dp[prev][w-weight] + value
-			if newValue > dp[curr][w] {
-				dp[curr][w] = newValue
+			// 📌 修正点 5: dp[prev][w-weight] を dp[w-weight] に変更
+			newValue := dp[w-weight] + value
+
+			// 📌 修正点 6: dp[curr][w] を dp[w] に変更
+			if newValue > dp[w] {
+				dp[w] = newValue
 				choice[i][w] = true
 			}
 		}
-
-		// 次の反復のためにprevとcurrを入れ替え
-		prev, curr = curr, prev
 	}
-
 	// 最適解を復元
-	bestValue := dp[prev][robotCapacity]
+	bestValue := dp[robotCapacity]
 	bestSet := make([]model.Order, 0)
-	
+
 	// 逆順に復元
 	w := robotCapacity
 	for i := n - 1; i >= 0; i-- {
