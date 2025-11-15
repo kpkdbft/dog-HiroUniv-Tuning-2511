@@ -4,11 +4,10 @@ import (
 	"backend/internal/model"
 	"context"
 	"fmt"
-	"strconv"
+	"strconv" // ORDER BY のために必要
 	"time"
 
 	"github.com/go-redis/redis/v8"
-	// Rdbクライアントのためにインポート
 )
 
 type ProductRepository struct {
@@ -20,10 +19,10 @@ func NewProductRepository(db DBTX, rdb *redis.Client) *ProductRepository {
 	return &ProductRepository{db: db, rdb: rdb}
 }
 
-// 商品一覧を全件取得し、アプリケーション側でページング処理を行う
+// 商品一覧を取得 (DB側でソート、フィルタ、ページネーションを実行)
 func (r *ProductRepository) ListProducts(ctx context.Context, userID int, req model.ListRequest) ([]model.Product, int, error) {
 	fmt.Printf("list products")
-	var products []model.Product
+
 	baseQuery := `
 		SELECT product_id, name, value, weight, image, description
 		FROM products
@@ -32,81 +31,63 @@ func (r *ProductRepository) ListProducts(ctx context.Context, userID int, req mo
 		SELECT COUNT(*)
 		FROM products
 	`
+
+	whereClause := ""
 	args := []interface{}{}
 	countArgs := []interface{}{}
 
 	if req.Search != "" {
-		// 検索ありの場合: FULLTEXT検索を適用 (キャッシュ対象外)
-		baseQuery += " WHERE MATCH(name, description) AGAINST (? IN BOOLEAN MODE) "
-		countQuery += " WHERE MATCH(name, description) AGAINST (? IN BOOLEAN MODE) "
-		searchPattern := req.Search + "*"
+		whereClause = " WHERE MATCH(name, description) AGAINST (? IN BOOLEAN MODE) "
+		searchPattern := req.Search
 		args = append(args, searchPattern)
 		countArgs = append(countArgs, searchPattern)
-	}
-
-	if req.Offset != 0 {
-		if req.Search != "" {
-			baseQuery += " AND product_id > ? "
-		} else {
-			baseQuery += " WHERE product_id > ? "
-		}
-		args = append(args, req.Offset)
 	}
 
 	var total int
 	var err error
 
-	// 1. 🔍 COUNT(*)のキャッシュ処理
-	// 検索条件がない（req.Search == ""）場合のみ、キャッシュを利用する。
+	const totalCacheKey = "product:count:total"
+
+	// 検索条件がない場合のみキャッシュを試みる
 	if req.Search == "" {
-		const cacheKey = "product:count:total"
-
-		// 🚨 注意: r.Rdb は ProductRepository に Rdb クライアントがDIされていることを前提
-		// r.Rdb がない場合は、Store経由でアクセスするように修正が必要です。
-		rdbClient := r.rdb // 仮にここでRedisクライアントにアクセス可能とします
-
-		val, redisErr := rdbClient.Get(ctx, cacheKey).Result()
-
+		val, redisErr := r.rdb.Get(ctx, totalCacheKey).Result()
 		if redisErr == nil {
-			// キャッシュヒット: Redisから取得した値をセットし、DBアクセスをスキップ
+			// キャッシュヒット
 			total, err = strconv.Atoi(val)
-			if err == nil {
-				// fmt.Printf("Cache Hit: Total=%d", total)
-				goto ExecuteSelectQuery // DBのCOUNT(*)をスキップし、SELECTへジャンプ
+			if err != nil {
+				// キャッシュデータが不正な場合、フォールバック (total=0のまま)
+				total = 0
 			}
+			// fmt.Printf("Cache Hit: Total=%d", total)
 		}
-		// Redisエラー (キャッシュミス) の場合、DBへフォールバック
+		// else: キャッシュミス (total=0のまま)
 	}
 
-	// 2. 🗃️ DBからのCOUNT(*)実行
-	err = r.db.GetContext(ctx, &total, r.db.Rebind(countQuery), countArgs...)
+	// キャッシュから取得できなかった場合 (total=0) のみDBに聞く
+	if total == 0 {
+		err = r.db.GetContext(ctx, &total, r.db.Rebind(countQuery+whereClause), countArgs...)
+		if err != nil {
+			return nil, 0, err
+		}
 
-	if err != nil {
-		return nil, 0, err
+		// DBから取得し、それがキャッシュ対象（検索なし）ならRedisに保存
+		if req.Search == "" {
+			// Setのエラーは非クリティカルなので無視
+			r.rdb.Set(ctx, totalCacheKey, total, 5*time.Minute)
+		}
 	}
 
-	// 3. 💾 キャッシュミスの場合、Redisに書き込み
-	if req.Search == "" {
-		const cacheKey = "product:count:total"
-		rdbClient := r.rdb // Redisクライアントを取得
+	var products []model.Product
 
-		// TTL (Time To Live): 5分間キャッシュ
-		rdbClient.Set(ctx, cacheKey, total, 5*time.Minute)
+	finalQuery := baseQuery + whereClause + " "
+	finalQuery += " ORDER BY " + req.SortField + " " + req.SortOrder + " , product_id ASC"
+
+	if req.PageSize > 0 {
+		finalQuery += " LIMIT ? OFFSET ? "
+		args = append(args, req.PageSize, req.Offset)
 	}
 
-	// 4. SELECTクエリの実行
-ExecuteSelectQuery: // キャッシュヒットまたはDB COUNT(*)後にここにジャンプ
-
-	baseQuery += " ORDER BY " + req.SortField + " " + req.SortOrder + " , product_id ASC"
-	if req.PageSize >= 0 {
-		baseQuery += " LIMIT ? "
-		args = append(args, req.PageSize)
-	}
-	if req.Offset != 0 {
-		baseQuery += " OFFSET ? "
-		args = append(args, req.Offset)
-	}
-	err = r.db.SelectContext(ctx, &products, r.db.Rebind(baseQuery), args...) // Rebindを追記
+	err = r.db.SelectContext(ctx, &products, r.db.Rebind(finalQuery), args...)
 	if err != nil {
 		return nil, 0, err
 	}

@@ -83,7 +83,7 @@ func (r *OrderRepository) UpdateStatuses(ctx context.Context, orderIDs []int64, 
 	if len(orderIDs) == 0 {
 		return nil
 	}
-	query, args, err := sqlx.In("UPDATE orders SET shipped_status = ? WHERE order_id IN (?)", newStatus, orderIDs)
+	query, args, err := sqlx.In("UPDATE orders SET shipped_status = ? WHERE order_id IN (?) ", newStatus, orderIDs)
 	if err != nil {
 		return err
 	}
@@ -126,19 +126,11 @@ func (r *OrderRepository) ListOrders(ctx context.Context, userID int, req model.
 		sortColumn = "o.order_id" // デフォルトのソート列
 	}
 
-	sortOrder := "ASC"
+	sortOrder := "ASC "
 	if strings.ToUpper(req.SortOrder) == "DESC" {
-		sortOrder = "DESC"
+		sortOrder = "DESC "
 	}
 
-	if req.PageSize < 0 {
-		// PageSizeが0以下の場合、デフォルト値を設定（例: 20件）
-		// これにより LIMIT 0 を防ぐ
-		req.PageSize = 20
-	}
-	if req.Offset < 0 {
-		req.Offset = 0 // 負のオフセットは0にする
-	}
 	// --- 2. フィルタリング条件の構築 (総件数クエリとメインクエリで共用) ---
 	whereClauses := []string{"o.user_id = ?"}
 	// メインクエリ用の引数リスト
@@ -179,9 +171,9 @@ func (r *OrderRepository) ListOrders(ctx context.Context, userID int, req model.
 
 	var orderByClause string
 	if sortColumn == "o.order_id" {
-		orderByClause = fmt.Sprintf("ORDER BY %s %s", sortColumn, sortOrder)
+		orderByClause = fmt.Sprintf(" ORDER BY %s %s ", sortColumn, sortOrder)
 	} else {
-		orderByClause = fmt.Sprintf("ORDER BY %s %s, o.order_id ASC", sortColumn, sortOrder)
+		orderByClause = fmt.Sprintf(" ORDER BY %s %s, o.order_id ASC ", sortColumn, sortOrder)
 	}
 
 	query := `
@@ -195,11 +187,12 @@ func (r *OrderRepository) ListOrders(ctx context.Context, userID int, req model.
 		FROM orders o
 		JOIN products p ON o.product_id = p.product_id
 		WHERE ` + whereQuery + `
-		` + orderByClause + `
-		LIMIT ? OFFSET ?`
+		` + orderByClause
 
-	// メインクエリ用の引数にLIMITとOFFSETを追加
-	args = append(args, req.PageSize, req.Offset)
+	if req.PageSize > 0 {
+		query += `LIMIT ? OFFSET ?`
+		args = append(args, req.PageSize, req.Offset)
+	}
 
 	// --- 5. クエリ実行とマッピング ---
 	// ( ... これ以降のロジックは変更なし )

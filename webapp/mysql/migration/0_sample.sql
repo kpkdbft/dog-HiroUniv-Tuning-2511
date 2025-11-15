@@ -10,4 +10,4 @@ CREATE INDEX idx_products_count ON products(product_id);
 ALTER TABLE orders
   ADD INDEX idx_orders_shipping (shipped_status, product_id, order_id);
 
-ALTER TABLE products ADD FULLTEXT INDEX ft_products_name_desc(name, description) COMMENT 'parser "TokenBigramSplitSymbol"';
+ALTER TABLE products ADD FULLTEXT INDEX ft_products_name_desc(name, description) COMMENT 'parser "TokenBigramSplitSymbolAlphaDigit"';
