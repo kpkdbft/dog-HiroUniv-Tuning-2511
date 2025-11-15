@@ -24,6 +24,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      redis:
+        condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS -o /dev/null http://127.0.0.1:${PORT:-8080}/api/health || exit 1"]
       interval: 5s
@@ -132,6 +134,24 @@ services:
     networks:
       - webapp-network
 
+  redis:
+    image: redis:7-alpine # 軽量なAlpineベースのRedisイメージを使用
+    container_name: tuning-redis
+    ports:
+      - "6379:6379" # 外部からのアクセスが必要な場合のみポート公開
+    volumes:
+      - ./redis/data:/data # データの永続化のためのボリュームを定義
+      - ./redis/redis.conf:/usr/local/etc/redis/redis.conf
+      - ./redis_modules:/usr/local/lib/redis/modules
+    command: redis-server /usr/local/etc/redis/redis.conf
+    networks: 
+      - webapp-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "--raw", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
 # ----------------------------------------------------
 # ネットワーク定義: コンテナ間の通信
 # ----------------------------------------------------
@@ -139,3 +159,4 @@ networks:
   webapp-network:
     name: webapp-network
     external: true
+
