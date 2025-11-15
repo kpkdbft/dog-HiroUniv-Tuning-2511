@@ -53,7 +53,7 @@ func (r *ProductRepository) ListProducts(ctx context.Context, userID int, req mo
 	}
 
 	baseQuery += " ORDER BY " + req.SortField + " " + req.SortOrder + " , product_id ASC"
-	if req.PageSize != 0 {
+	if req.PageSize >= 0 {
 		baseQuery += " LIMIT ? "
 		args = append(args, req.PageSize)
 	}
