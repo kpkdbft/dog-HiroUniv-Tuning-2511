@@ -30,11 +30,11 @@ func (r *ProductRepository) ListProducts(ctx context.Context, userID int, req mo
 	countArgs := []interface{}{}
 
 	if req.Search != "" {
-		baseQuery += " WHERE (name LIKE ? OR description LIKE ?)"
-		countQuery += " WHERE (name LIKE ? OR description LIKE ?)"
-		searchPattern := "%" + req.Search + "%"
-		args = append(args, searchPattern, searchPattern)
-		countArgs = append(countArgs, searchPattern, searchPattern)
+		baseQuery += " WHERE MATCH(name, description) AGAINST (? IN NATURAL LANGUAGE MODE) "
+		countQuery += " WHERE MATCH(name, description) AGAINST (? IN NATURAL LANGUAGE MODE) "
+		// searchPattern := "%" + req.Search + "%"
+		args = append(args, req.Search)
+		countArgs = append(countArgs, req.Search)
 	}
 
 	var total int
