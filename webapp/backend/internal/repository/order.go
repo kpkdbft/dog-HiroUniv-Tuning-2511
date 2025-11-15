@@ -67,9 +67,16 @@ func (r *OrderRepository) GetShippingOrders(ctx context.Context) ([]model.Order,
 // 注文履歴一覧を取得
 func (r *OrderRepository) ListOrders(ctx context.Context, userID int, req model.ListRequest) ([]model.Order, int, error) {
 	query := `
-        SELECT order_id, product_id, shipped_status, created_at, arrived_at
-        FROM orders
-        WHERE user_id = ?
+        SELECT 
+            o.order_id, 
+            o.product_id, 
+            o.shipped_status, 
+            o.created_at, 
+            o.arrived_at,
+            p.name AS product_name
+        FROM orders o
+        JOIN products p ON o.product_id = p.product_id
+        WHERE o.user_id = ?
     `
 	type orderRow struct {
 		OrderID       int          `db:"order_id"`
@@ -77,6 +84,7 @@ func (r *OrderRepository) ListOrders(ctx context.Context, userID int, req model.
 		ShippedStatus string       `db:"shipped_status"`
 		CreatedAt     sql.NullTime `db:"created_at"`
 		ArrivedAt     sql.NullTime `db:"arrived_at"`
+		ProductName   string       `db:"product_name"`
 	}
 	var ordersRaw []orderRow
 	if err := r.db.SelectContext(ctx, &ordersRaw, query, userID); err != nil {
@@ -85,17 +93,13 @@ func (r *OrderRepository) ListOrders(ctx context.Context, userID int, req model.
 
 	var orders []model.Order
 	for _, o := range ordersRaw {
-		var productName string
-		if err := r.db.GetContext(ctx, &productName, "SELECT name FROM products WHERE product_id = ?", o.ProductID); err != nil {
-			return nil, 0, err
-		}
 		if req.Search != "" {
 			if req.Type == "prefix" {
-				if !strings.HasPrefix(productName, req.Search) {
+				if !strings.HasPrefix(o.ProductName, req.Search) {
 					continue
 				}
 			} else {
-				if !strings.Contains(productName, req.Search) {
+				if !strings.Contains(o.ProductName, req.Search) {
 					continue
 				}
 			}
@@ -103,7 +107,7 @@ func (r *OrderRepository) ListOrders(ctx context.Context, userID int, req model.
 		orders = append(orders, model.Order{
 			OrderID:       int64(o.OrderID),
 			ProductID:     o.ProductID,
-			ProductName:   productName,
+			ProductName:   o.ProductName,
 			ShippedStatus: o.ShippedStatus,
 			CreatedAt:     o.CreatedAt.Time,
 			ArrivedAt:     o.ArrivedAt,
