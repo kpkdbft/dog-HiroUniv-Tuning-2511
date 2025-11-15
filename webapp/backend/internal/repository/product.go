@@ -37,10 +37,17 @@ func (r *ProductRepository) ListProducts(ctx context.Context, userID int, req mo
 		countArgs = append(countArgs, searchPattern)
 	}
 
+	if req.Offset != 0 {
+		if req.Search != "" {
+			baseQuery += " AND product_id > ? "
+		} else {
+			baseQuery += " WHERE product_id > ? "
+		}
+		args = append(args, req.Offset)
+	}
+
 	var total int
 	err := r.db.GetContext(ctx, &total, r.db.Rebind(countQuery), countArgs...)
-	fmt.Printf("%v", err)
-
 	if err != nil {
 		return nil, 0, err
 	}
@@ -50,10 +57,7 @@ func (r *ProductRepository) ListProducts(ctx context.Context, userID int, req mo
 		baseQuery += " LIMIT ? "
 		args = append(args, req.PageSize)
 	}
-	if req.Offset != 0 {
-		baseQuery += " OFFSET ? "
-		args = append(args, req.Offset)
-	}
+
 	err = r.db.SelectContext(ctx, &products, baseQuery, args...)
 	if err != nil {
 		return nil, 0, err
