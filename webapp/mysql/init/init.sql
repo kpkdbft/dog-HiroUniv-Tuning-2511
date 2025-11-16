@@ -23,6 +23,12 @@ CREATE TABLE products (
 DEFAULT CHARSET=utf8mb4
 COLLATE=utf8mb4_0900_ai_ci;
 
+ALTER TABLE products
+  ADD FULLTEXT INDEX ft_products_name_desc (name, description) WITH PARSER ngram;
+CREATE INDEX idx_products_count ON products(product_id);
+CREATE INDEX idx_products_name ON products(name);
+
+
 CREATE TABLE orders (
     order_id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     user_id INT UNSIGNED NOT NULL,
@@ -33,6 +39,10 @@ CREATE TABLE orders (
     FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
     FOREIGN KEY (product_id) REFERENCES products(product_id) ON DELETE CASCADE
 );
+
+ALTER TABLE orders
+  ADD INDEX idx_orders_shipping (shipped_status, product_id, order_id);
+
 
 CREATE TABLE `user_sessions` (
   `id` BIGINT NOT NULL AUTO_INCREMENT,
