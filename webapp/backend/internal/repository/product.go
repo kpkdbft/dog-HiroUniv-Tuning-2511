@@ -37,10 +37,15 @@ func (r *ProductRepository) ListProducts(ctx context.Context, userID int, req mo
 	countArgs := []interface{}{}
 
 	if req.Search != "" {
-		whereClause = " WHERE MATCH(name, description) AGAINST (? IN BOOLEAN MODE) "
-		searchPattern := req.Search
-		args = append(args, searchPattern)
-		countArgs = append(countArgs, searchPattern)
+		whereClause = " WHERE name LIKE ? OR description LIKE ? "
+
+		// LIKE検索用にワイルドカードを追加
+		searchPattern := "%" + req.Search + "%"
+
+		// SELECTクエリ用の引数
+		args = append(args, searchPattern, searchPattern)
+		// COUNTクエリ用の引数 (同じ引数を2回ずつ追加)
+		countArgs = append(countArgs, searchPattern, searchPattern)
 	}
 
 	var total int
