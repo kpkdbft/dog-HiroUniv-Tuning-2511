@@ -24,7 +24,7 @@ func NewStore(db DBTX, rdb *redis.Client) *Store {
 		UserRepo:    NewUserRepository(db),
 		SessionRepo: NewSessionRepository(db),
 		ProductRepo: NewProductRepository(db, rdb),
-		OrderRepo:   NewOrderRepository(db),
+		OrderRepo:   NewOrderRepository(db, rdb),
 	}
 }
 

@@ -10,6 +10,8 @@ CREATE TABLE `users` (
   `password_hash` VARCHAR(255) NOT NULL,
   `user_name` VARCHAR(255) NOT NULL
   );
+-- ログイン検索高速化のためユーザー名にユニークインデックス
+CREATE UNIQUE INDEX idx_users_username ON users(user_name);
 
 -- productsテーブルの作成
 CREATE TABLE products (
@@ -43,3 +45,17 @@ CREATE TABLE `user_sessions` (
   UNIQUE KEY `session_uuid` (`session_uuid`),
   FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
 );
+
+-- 追加インデックス群（初期化時に適用）
+-- 名前検索用のインデックス（prefix検索向け）
+CREATE INDEX idx_products_name ON products(name);
+-- COUNT(*) を高速化するためのセカンダリインデックス（Cover用）
+CREATE INDEX idx_products_count ON products(product_id);
+-- ユーザー別一覧のページング＋結合キーをカバー
+CREATE INDEX idx_orders_user_orderid_product ON orders(user_id, order_id, product_id);
+-- 配送中一覧を高速化（GetShippingOrders 用）
+ALTER TABLE orders
+  ADD INDEX idx_orders_shipping (shipped_status, product_id, order_id);
+-- 日本語対応の全文検索（ngramパーサ）を有効化
+ALTER TABLE products
+  ADD FULLTEXT INDEX ft_products_name_desc (name, description) WITH PARSER ngram;

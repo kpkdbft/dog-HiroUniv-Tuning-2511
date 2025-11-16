@@ -4,16 +4,19 @@ import (
 	"backend/internal/model"
 	"context"
 	"fmt"
-	"strconv" // ORDER BY のために必要
 	"time"
 
 	"github.com/go-redis/redis/v8"
+	"encoding/json"
+	"golang.org/x/sync/singleflight"
 )
 
 type ProductRepository struct {
 	db  DBTX
 	rdb *redis.Client
 }
+
+var productSF singleflight.Group
 
 func NewProductRepository(db DBTX, rdb *redis.Client) *ProductRepository {
 	return &ProductRepository{db: db, rdb: rdb}
@@ -37,44 +40,17 @@ func (r *ProductRepository) ListProducts(ctx context.Context, userID int, req mo
 	countArgs := []interface{}{}
 
 	if req.Search != "" {
-		whereClause = " WHERE MATCH(name, description) AGAINST (? IN BOOLEAN MODE) "
-		searchPattern := req.Search
-		args = append(args, searchPattern)
-		countArgs = append(countArgs, searchPattern)
+		// LIKE 検索にフォールバック（E2Eの安定性・互換性を優先）
+		whereClause = " WHERE (name LIKE ? OR description LIKE ?) "
+		searchPattern := "%" + req.Search + "%"
+		args = append(args, searchPattern, searchPattern)
+		countArgs = append(countArgs, searchPattern, searchPattern)
 	}
 
 	var total int
-	var err error
-
-	const totalCacheKey = "product:count:total"
-
-	// 検索条件がない場合のみキャッシュを試みる
-	if req.Search == "" {
-		val, redisErr := r.rdb.Get(ctx, totalCacheKey).Result()
-		if redisErr == nil {
-			// キャッシュヒット
-			total, err = strconv.Atoi(val)
-			if err != nil {
-				// キャッシュデータが不正な場合、フォールバック (total=0のまま)
-				total = 0
-			}
-			// fmt.Printf("Cache Hit: Total=%d", total)
-		}
-		// else: キャッシュミス (total=0のまま)
-	}
-
-	// キャッシュから取得できなかった場合 (total=0) のみDBに聞く
-	if total == 0 {
-		err = r.db.GetContext(ctx, &total, r.db.Rebind(countQuery+whereClause), countArgs...)
-		if err != nil {
-			return nil, 0, err
-		}
-
-		// DBから取得し、それがキャッシュ対象（検索なし）ならRedisに保存
-		if req.Search == "" {
-			// Setのエラーは非クリティカルなので無視
-			r.rdb.Set(ctx, totalCacheKey, total, 5*time.Minute)
-		}
+	// 総件数は常にDBから取得（E2Eの安定性優先。COUNTは軽量インデックスで最適化済み）
+	if err := r.db.GetContext(ctx, &total, r.db.Rebind(countQuery+whereClause), countArgs...); err != nil {
+		return nil, 0, err
 	}
 
 	var products []model.Product
@@ -87,10 +63,27 @@ func (r *ProductRepository) ListProducts(ctx context.Context, userID int, req mo
 		args = append(args, req.PageSize, req.Offset)
 	}
 
-	err = r.db.SelectContext(ctx, &products, r.db.Rebind(finalQuery), args...)
-	if err != nil {
-		return nil, 0, err
+	// 一覧ページの短TTLキャッシュ
+	listKey := fmt.Sprintf("product:list:q=%s:sort=%s:%s:p=%d:s=%d", req.Search, req.SortField, req.SortOrder, req.Page, req.PageSize)
+	if s, errGet := r.rdb.Get(ctx, listKey).Result(); errGet == nil {
+		if json.Unmarshal([]byte(s), &products) == nil {
+			return products, total, nil
+		}
 	}
+	v, errSF, _ := productSF.Do(listKey, func() (interface{}, error) {
+		var tmp []model.Product
+		if er := r.db.SelectContext(ctx, &tmp, r.db.Rebind(finalQuery), args...); er != nil {
+			return nil, er
+		}
+		if b, mErr := json.Marshal(tmp); mErr == nil {
+			_ = r.rdb.Set(ctx, listKey, b, 60*time.Second).Err()
+		}
+		return tmp, nil
+	})
+	if errSF != nil {
+		return nil, 0, errSF
+	}
+	products = v.([]model.Product)
 
 	return products, total, nil
 }

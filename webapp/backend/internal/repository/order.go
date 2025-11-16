@@ -8,14 +8,22 @@ import (
 	"strings"
 
 	"github.com/jmoiron/sqlx"
+	"github.com/go-redis/redis/v8"
+	"encoding/json"
+	"time"
+	"golang.org/x/sync/singleflight"
+	"strconv"
 )
 
 type OrderRepository struct {
-	db DBTX
+	db  DBTX
+	rdb *redis.Client
 }
 
-func NewOrderRepository(db DBTX) *OrderRepository {
-	return &OrderRepository{db: db}
+var orderSF singleflight.Group
+
+func NewOrderRepository(db DBTX, rdb *redis.Client) *OrderRepository {
+	return &OrderRepository{db: db, rdb: rdb}
 }
 
 // 注文を作成し、生成された注文IDを返す
@@ -138,13 +146,16 @@ func (r *OrderRepository) ListOrders(ctx context.Context, userID int, req model.
 	// COUNTクエリ用の引数リスト (LIMIT/OFFSETを含まないため別管理)
 	countArgs := []interface{}{userID}
 
+	var searchKey string
 	if req.Search != "" {
 		var searchPattern string
 		if req.Type == "prefix" {
 			searchPattern = req.Search + "%"
+			searchKey = searchPattern
 		} else {
 			// デフォルトは "contains"
 			searchPattern = "%" + req.Search + "%"
+			searchKey = searchPattern
 		}
 		whereClauses = append(whereClauses, "p.name LIKE ?")
 		args = append(args, searchPattern)
@@ -161,10 +172,24 @@ func (r *OrderRepository) ListOrders(ctx context.Context, userID int, req model.
 		WHERE ` + whereQuery
 
 	var total int
-	countQueryRebound := r.db.Rebind(countQuery)
-	// COUNTクエリには countArgs を使用
-	if err := r.db.GetContext(ctx, &total, countQueryRebound, countArgs...); err != nil {
-		return nil, 0, fmt.Errorf("failed to count orders: %w", err)
+	// 短TTLキャッシュ（ユーザー別＋検索値を含める）
+	totalKey := fmt.Sprintf("order:count:u=%d:q=%s", userID, searchKey)
+	if r.rdb != nil {
+		if s, err := r.rdb.Get(ctx, totalKey).Result(); err == nil {
+			if v, convErr := strconv.Atoi(s); convErr == nil {
+				total = v
+			}
+		}
+	}
+	if total == 0 {
+		countQueryRebound := r.db.Rebind(countQuery)
+		// COUNTクエリには countArgs を使用
+		if err := r.db.GetContext(ctx, &total, countQueryRebound, countArgs...); err != nil {
+			return nil, 0, fmt.Errorf("failed to count orders: %w", err)
+		}
+		if r.rdb != nil {
+			_ = r.rdb.Set(ctx, totalKey, total, 60*time.Second).Err()
+		}
 	}
 
 	// --- 4. メインクエリの構築 (ORDER BY, LIMIT, OFFSET) ---
@@ -208,9 +233,51 @@ func (r *OrderRepository) ListOrders(ctx context.Context, userID int, req model.
 
 	var ordersRaw []orderRow
 	queryRebound := r.db.Rebind(query)
-	// メインクエリには args を使用
-	if err := r.db.SelectContext(ctx, &ordersRaw, queryRebound, args...); err != nil {
-		return nil, 0, fmt.Errorf("failed to list orders: %w", err)
+	// キャッシュヒットを試行
+	cacheKey := fmt.Sprintf("order:list:u=%d:q=%s:sort=%s:%s:p=%d:s=%d", userID, searchKey, sortColumn, sortOrder, req.Page, req.PageSize)
+	if r.rdb != nil {
+		if s, err := r.rdb.Get(ctx, cacheKey).Result(); err == nil {
+			if json.Unmarshal([]byte(s), &ordersRaw) == nil {
+				// キャッシュヒット時は ordersRaw が埋まっている
+			} else {
+				// キャッシュ壊れ時は生成
+				v, errSF, _ := orderSF.Do(cacheKey, func() (interface{}, error) {
+					var tmp []orderRow
+					if er := r.db.SelectContext(ctx, &tmp, queryRebound, args...); er != nil {
+						return nil, fmt.Errorf("failed to list orders: %w", er)
+					}
+					if b, mErr := json.Marshal(tmp); mErr == nil {
+						_ = r.rdb.Set(ctx, cacheKey, b, 60*time.Second).Err()
+					}
+					return tmp, nil
+				})
+				if errSF != nil {
+					return nil, 0, fmt.Errorf("failed to list orders: %w", errSF)
+				}
+				ordersRaw = v.([]orderRow)
+			}
+		} else {
+			// キャッシュミス時は生成
+			v, errSF, _ := orderSF.Do(cacheKey, func() (interface{}, error) {
+				var tmp []orderRow
+				if er := r.db.SelectContext(ctx, &tmp, queryRebound, args...); er != nil {
+					return nil, fmt.Errorf("failed to list orders: %w", er)
+				}
+				if b, mErr := json.Marshal(tmp); mErr == nil {
+					_ = r.rdb.Set(ctx, cacheKey, b, 60*time.Second).Err()
+				}
+				return tmp, nil
+			})
+			if errSF != nil {
+				return nil, 0, fmt.Errorf("failed to list orders: %w", errSF)
+			}
+			ordersRaw = v.([]orderRow)
+		}
+	} else {
+		// Redis 未利用の場合はそのまま実行
+		if err := r.db.SelectContext(ctx, &ordersRaw, queryRebound, args...); err != nil {
+			return nil, 0, fmt.Errorf("failed to list orders: %w", err)
+		}
 	}
 
 	// --- 6. 結果のマッピング ---

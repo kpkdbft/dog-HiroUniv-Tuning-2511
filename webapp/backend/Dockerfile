@@ -10,6 +10,10 @@ COPY . .
 
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
+    go mod download && go mod tidy
+
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=1 go build -o /usr/local/bin/server ./cmd
 
 FROM hiroshimauniv2511.azurecr.io/backend:base AS production

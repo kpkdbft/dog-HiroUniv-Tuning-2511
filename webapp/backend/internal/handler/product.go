@@ -138,13 +138,8 @@ func (h *ProductHandler) GetImage(w http.ResponseWriter, r *http.Request) {
 		contentType = "application/octet-stream"
 	}
 	w.Header().Set("Content-Type", contentType)
-
-	data, err := os.ReadFile(fullPath)
-	if err != nil {
-		fmt.Printf("画像ファイルの読み込みに失敗: %s\n", fullPath)
-		http.Error(w, "画像の読み込みに失敗しました", http.StatusInternalServerError)
-		return
-	}
-
-	w.Write(data)
+	// nginx に内部リダイレクトして配信（X-Accel-Redirect）
+	internalPath := "/protected-images/" + imagePath
+	w.Header().Set("X-Accel-Redirect", internalPath)
+	w.WriteHeader(http.StatusOK)
 }

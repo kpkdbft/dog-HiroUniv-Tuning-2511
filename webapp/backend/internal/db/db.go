@@ -17,7 +17,7 @@ func InitDBConnection() (*sqlx.DB, error) {
 	if dbUrl == "" {
 		dbUrl = "user:password@tcp(db:4306)/hiroshimauniv2511-db"
 	}
-	dsn := fmt.Sprintf("%s?charset=utf8mb4&parseTime=True&loc=UTC", dbUrl)
+	dsn := fmt.Sprintf("%s?charset=utf8mb4&parseTime=True&loc=UTC&interpolateParams=true", dbUrl)
 	log.Printf(dsn)
 
 	driverName := telemetry.WrapSQLDriver("mysql")
@@ -37,9 +37,13 @@ func InitDBConnection() (*sqlx.DB, error) {
 	}
 	log.Println("Successfully connected to MySQL!")
 
-	dbConn.SetMaxOpenConns(25)
-	dbConn.SetMaxIdleConns(10)
-	dbConn.SetConnMaxLifetime(0)
+	// 2コア環境向けにコネクションプールを調整
+	// - MaxOpenConns: CPUコア数×8 目安（スロークエリ時の待ちを抑えつつ過剰にしない）
+	// - MaxIdleConns: 同等に確保して接続確立コストを低減
+	// - ConnMaxLifetime: MySQL側のキャッシュ悪化や接続劣化を避けるため定期再作成
+	dbConn.SetMaxOpenConns(16)
+	dbConn.SetMaxIdleConns(16)
+	dbConn.SetConnMaxLifetime(5 * time.Minute)
 
 	return dbConn, nil
 }
