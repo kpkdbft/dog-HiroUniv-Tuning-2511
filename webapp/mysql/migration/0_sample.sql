@@ -11,4 +11,4 @@ ALTER TABLE orders
   ADD INDEX idx_orders_shipping (shipped_status, product_id, order_id);
 
 ALTER TABLE products
-  ADD FULLTEXT INDEX ft_products_name_desc (name, description) WITH PARSER ngram;
+  ADD FULLTEXT INDEX ft_products_name_desc (name, description) COMMENT 'tokenizer "TokenBigramSplitSymbolAlphaDigit"';
